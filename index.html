@@ -656,6 +656,27 @@ enterBtn.onclick = async () => {
     document.getElementById('hud').style.display = 'none';
     document.getElementById('honesty').style.display = 'none';
     hint("Pinch an orb to run it through the gate. Palm-up for menu.", 6000);
+    // hands-only enforcement: warn if controllers are live or no hands are tracked
+    let handsWarned = false, ctrlWarned = false;
+    const checkInputs = () => {
+      if (!xrSession) return;
+      const srcs = xrSession.inputSources || [];
+      const hands = srcs.filter(s => s.hand).length;
+      const ctrls = srcs.filter(s => !s.hand).length;
+      if (hands === 0 && !handsWarned) {
+        handsWarned = true;
+        hint("No hands detected — enable hand tracking: Quest Settings → Movement tracking → Hand tracking ON.", 12000);
+      }
+      if (ctrls > 0 && !ctrlWarned) {
+        ctrlWarned = true;
+        hint("Controller detected — set the controllers down. This demo is hands-only.", 12000);
+      }
+      if (ctrls === 0) ctrlWarned = false;
+      if (hands > 0) handsWarned = false;
+    };
+    xrSession.addEventListener('inputsourceschange', checkInputs);
+    setTimeout(checkInputs, 3000);
+    const inputPoll = setInterval(() => { if (!xrSession) clearInterval(inputPoll); else checkInputs(); }, 5000);
     xrSession.addEventListener('end', () => {
       isVR = false; xrSession = null;
       document.getElementById('hud').style.display = 'flex';
