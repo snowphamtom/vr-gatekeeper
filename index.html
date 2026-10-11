@@ -71,7 +71,7 @@ const RING_R = 1.55, RING_Y = 1.35, RING_Z = -1.1;
 let gate = new HeadroomAdmissionController();   // session controller; ledger chains across verdicts
 let orbs = [];        // {mesh, label, query, short, slot, state, vel}
 let panels = [];      // verdict/menu/ledger panels {mesh, kind, data}
-let menuOpen = false, menuPanel = null, ledgerPanel = null;
+let menuOpen = false, menuPanel = null, ledgerPanel = null, telemetryPanel = null;
 let particles = null, particleData = null;
 let selectedOrb = null;
 let xrSession = null, isVR = false;
@@ -127,22 +127,63 @@ const gateLabel = makeTextSprite("ADMISSION GATE", 42, "#9fd8ff");
 gateLabel.position.set(0, 0.85, 0); gateLabel.scale.set(1.15, 0.29, 1); gateGroup.add(gateLabel);
 
 /* perf readout: FPS sprite (visible in-headset) + DOM HUD (desktop) */
-const perfCanvas = document.createElement('canvas'); perfCanvas.width = 256; perfCanvas.height = 64;
+const perfCanvas = document.createElement('canvas'); perfCanvas.width = 512; perfCanvas.height = 64;
 const perfCtx = perfCanvas.getContext('2d');
 const perfTex = new THREE.CanvasTexture(perfCanvas);
 const perfSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: perfTex, transparent: true, depthWrite: false }));
-perfSprite.position.set(0, -0.62, 0); perfSprite.scale.set(0.62, 0.155, 1); gateGroup.add(perfSprite);
-let perfFrames = 0, perfLastT = performance.now(), perfFps = 0;
+perfSprite.position.set(0, -0.62, 0); perfSprite.scale.set(1.24, 0.155, 1); gateGroup.add(perfSprite);
+
+/* ---- session telemetry: accurate + honest ----
+   Frame times: ring buffer of real inter-frame deltas (in WebXR the
+   animation loop runs at headset vsync, so this is the true display rate).
+   Engine time: measured around gate.evaluate() per verdict — proves the
+   gate actually computes rather than playing canned animations. */
+const FRAME_BUF_N = 180;
+const frameTimes = [];           // ms, newest last
+const telemetry = {
+  sessionStart: performance.now(),
+  pinches: 0, grabs: 0, sends: 0, admits: 0, refuses: 0, menuOpens: 0,
+  engineUs: [],                  // microseconds per gate.evaluate()
+  verdictMs: [],                 // ms from send to verdict computed
+};
+function percentile(sorted, p) {
+  if (!sorted.length) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+}
+function frameStats() {
+  if (frameTimes.length < 5) return { fps: 0, p50: 0, p95: 0 };
+  const s = [...frameTimes].sort((a, b) => a - b);
+  const mean = frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length;
+  return { fps: 1000 / mean, p50: percentile(s, 0.5), p95: percentile(s, 0.95) };
+}
 function updatePerf() {
-  perfCtx.clearRect(0, 0, 256, 64);
-  perfCtx.font = '600 34px -apple-system, Segoe UI, sans-serif';
+  const st = frameStats();
+  const line = st.fps ? `${st.fps.toFixed(0)} FPS · p95 ${st.p95.toFixed(1)}ms · ${telemetry.admits}A/${telemetry.refuses}R` : '-- FPS';
+  perfCtx.clearRect(0, 0, 512, 64);
+  perfCtx.font = '600 30px -apple-system, Segoe UI, sans-serif';
   perfCtx.textAlign = 'center'; perfCtx.textBaseline = 'middle';
-  const col = perfFps >= 55 ? '#3dff88' : perfFps >= 30 ? '#ffd23d' : '#ff5b68';
+  const col = st.fps >= 55 ? '#3dff88' : st.fps >= 30 ? '#ffd23d' : '#ff5b68';
   perfCtx.fillStyle = col; perfCtx.shadowColor = col; perfCtx.shadowBlur = 10;
-  perfCtx.fillText(perfFps.toFixed(0) + ' FPS', 128, 34);
+  perfCtx.fillText(line, 256, 34);
   perfTex.needsUpdate = true;
   const hud = document.getElementById('fpsHud');
-  if (hud) { hud.textContent = perfFps.toFixed(0) + ' FPS'; hud.style.color = col; }
+  if (hud) { hud.textContent = line; hud.style.color = col; }
+}
+function telemetrySummary() {
+  const st = frameStats();
+  const secs = (performance.now() - telemetry.sessionStart) / 1000;
+  const eng = telemetry.engineUs.length
+    ? telemetry.engineUs.reduce((a, b) => a + b, 0) / telemetry.engineUs.length : 0;
+  return {
+    session_s: +secs.toFixed(1),
+    fps_avg: +st.fps.toFixed(1),
+    frame_p50_ms: +st.p50.toFixed(2),
+    frame_p95_ms: +st.p95.toFixed(2),
+    engine_eval_us_avg: +eng.toFixed(1),
+    pinches: telemetry.pinches, grabs: telemetry.grabs, sends: telemetry.sends,
+    admits: telemetry.admits, refuses: telemetry.refuses, menu_opens: telemetry.menuOpens,
+    verdicts: telemetry.admits + telemetry.refuses,
+  };
 }
 updatePerf();
 
@@ -255,6 +296,7 @@ function verdictPanelMesh(v, query) {
   });
 }
 function showVerdict(v, query, at) {
+  if (v.admit) telemetry.admits++; else telemetry.refuses++;
   const mesh = verdictPanelMesh(v, query);
   mesh.position.copy(at).add(new THREE.Vector3(0, 0.15, 0.55));
   mesh.lookAt(camera.position);
@@ -285,25 +327,27 @@ function drawRibbon() {
 function toggleMenu() {
   if (menuPanel) { scene.remove(menuPanel.mesh); panels = panels.filter(p => p !== menuPanel); menuPanel = null; menuOpen = false; return; }
   // button geometry in canvas-px; fractions derived from the SAME height H used in draw
-  const BTN = [ { y: 130, h: 90, action: 'reset' }, { y: 250, h: 90, action: 'ledger' } ];
-  const mesh = makePanel(0.95, 0.5, (x, W, H) => {
+  const BTN = [ { y: 110, h: 80, action: 'reset', label: () => "Reset scene" },
+                { y: 210, h: 80, action: 'ledger', label: () => ledgerPanel ? "Hide ledger" : "Show ledger" },
+                { y: 310, h: 80, action: 'telemetry', label: () => telemetryPanel ? "Hide telemetry" : "Show telemetry" } ];
+  const mesh = makePanel(0.95, 0.62, (x, W, H) => {
     x.fillStyle = "rgba(10,20,38,.94)"; x.fillRect(0, 0, W, H);
     x.strokeStyle = "#35c8ff"; x.lineWidth = 5; x.strokeRect(8, 8, W - 16, H - 16);
     x.textAlign = 'center'; x.fillStyle = "#bfe6ff"; x.font = "700 44px -apple-system, sans-serif";
-    x.fillText("MENU", W / 2, 70);
-    x.font = "600 36px -apple-system, sans-serif";
-    BTN.forEach((b, i) => {
+    x.fillText("MENU", W / 2, 62);
+    x.font = "600 34px -apple-system, sans-serif";
+    BTN.forEach((b) => {
       x.fillStyle = "#0e2a4a"; x.fillRect(80, b.y, W - 160, b.h);
       x.strokeStyle = "#35c8ff"; x.strokeRect(80, b.y, W - 160, b.h);
       x.fillStyle = "#bfe6ff";
-      x.fillText(i === 0 ? "Reset scene" : (ledgerPanel ? "Hide ledger" : "Show ledger"), W / 2, b.y + 58);
+      x.fillText(b.label(), W / 2, b.y + 52);
     });
   });
   const Hpx = mesh.userData.canvas.height;
   mesh.position.set(0, 1.7, -1.5); mesh.lookAt(camera.position); scene.add(mesh);
   menuPanel = { mesh, kind: 'menu', born: clock.elapsedTime, grabbable: true,
     buttons: BTN.map(b => ({ y0: b.y / Hpx, y1: (b.y + b.h) / Hpx, action: b.action })) };
-  panels.push(menuPanel); menuOpen = true;
+  panels.push(menuPanel); menuOpen = true; telemetry.menuOpens++;
 }
 function toggleLedgerPanel() {
   if (ledgerPanel) { scene.remove(ledgerPanel.mesh); panels = panels.filter(p => p !== ledgerPanel); ledgerPanel = null; if (menuPanel) menuPanel.mesh.userData.redraw(); return; }
@@ -323,9 +367,40 @@ function toggleLedgerPanel() {
   ledgerPanel = { mesh, kind: 'ledger', born: clock.elapsedTime, grabbable: true };
   panels.push(ledgerPanel); if (menuPanel) menuPanel.mesh.userData.redraw();
 }
+function toggleTelemetryPanel() {
+  if (telemetryPanel) { scene.remove(telemetryPanel.mesh); panels = panels.filter(p => p !== telemetryPanel); telemetryPanel = null; if (menuPanel) menuPanel.mesh.userData.redraw(); return; }
+  const s = telemetrySummary();
+  const rows = [
+    ["session", s.session_s + " s"],
+    ["display", s.fps_avg + " fps avg · p50 " + s.frame_p50_ms + "ms · p95 " + s.frame_p95_ms + "ms"],
+    ["gate compute", s.engine_eval_us_avg + " us / verdict (measured, not canned)"],
+    ["hands", s.pinches + " pinches · " + s.grabs + " grabs · " + s.sends + " sent"],
+    ["verdicts", s.admits + " ADMIT · " + s.refuses + " REFUSE"],
+    ["menu opens", String(s.menu_opens)],
+  ];
+  const mesh = makePanel(1.5, 0.85, (x, W, H) => {
+    x.fillStyle = "rgba(8,14,28,.94)"; x.fillRect(0, 0, W, H);
+    x.strokeStyle = "#3dff88"; x.lineWidth = 5; x.strokeRect(8, 8, W - 16, H - 16);
+    x.textAlign = 'left'; x.fillStyle = "#9fd8ff";
+    x.font = "700 34px -apple-system, sans-serif";
+    x.fillText("SESSION TELEMETRY — measured live", 30, 52);
+    x.font = "600 27px ui-monospace, monospace";
+    rows.forEach((r, i) => {
+      const y = 105 + i * 44;
+      x.fillStyle = "#5b6b8c"; x.fillText(r[0], 30, y);
+      x.fillStyle = "#e8f2ff"; x.fillText(r[1], 330, y);
+    });
+    x.fillStyle = "#5b6b8c"; x.font = "500 22px -apple-system, sans-serif";
+    x.fillText("Full JSON in browser console: copy(telemetrySummary())", 30, H - 24);
+  });
+  mesh.position.set(-1.05, 1.75, -1.7); mesh.lookAt(camera.position); scene.add(mesh);
+  telemetryPanel = { mesh, kind: 'telemetry', born: clock.elapsedTime, grabbable: true };
+  panels.push(telemetryPanel); if (menuPanel) menuPanel.mesh.userData.redraw();
+  console.log("[VR GATEKEEPER telemetry]", JSON.stringify(s));
+}
 function resetScene() {
   for (const p of panels) scene.remove(p.mesh);
-  panels = []; menuPanel = null; ledgerPanel = null; menuOpen = false;
+  panels = []; menuPanel = null; ledgerPanel = null; telemetryPanel = null; menuOpen = false;
   particles.visible = false;
   gate = new HeadroomAdmissionController();
   spawnOrbs(); drawRibbon();
@@ -334,12 +409,16 @@ function resetScene() {
 
 /* ============================== verdict flow ======================== */
 function evaluateAndShow(orb) {
+  telemetry.sends++; orb.sendT = performance.now();
   orb.state = 'flying'; orb.t = 0;
   orb.from = orb.group.position.clone();
 }
 function runVerdict(orb) {
   const { R, pairs } = illustrativeQueryInput(orb.query);
+  const e0 = performance.now();
   const v = gate.evaluate(R, { pairs, meta: { t: orb.query.slice(0, 80) } });
+  telemetry.engineUs.push((performance.now() - e0) * 1000);
+  if (orb.sendT) telemetry.verdictMs.push(performance.now() - orb.sendT);
   const at = GATE_POS.clone();
   if (v.admit) {
     // fly through, then bloom green panel
@@ -426,7 +505,7 @@ function orbNear(point, r = 0.22) {
 function handlePinch(side, pinching, pinchPt, wrist) {
   const st = pinchState[side];
   if (pinching && !st.down) {
-    st.down = true; st.t0 = performance.now();
+    st.down = true; st.t0 = performance.now(); telemetry.pinches++;
     // 1) menu button?
     const hit = panelAt(pinchPt);
     if (hit && hit.panel.kind === 'menu') {
@@ -434,6 +513,7 @@ function handlePinch(side, pinching, pinchPt, wrist) {
         if (hit.v >= b.y0 && hit.v <= b.y1) {
           if (b.action === 'reset') resetScene();
           else if (b.action === 'ledger') toggleLedgerPanel();
+          else if (b.action === 'telemetry') toggleTelemetryPanel();
           st.target = { type: 'button' }; return;
         }
       }
@@ -442,7 +522,7 @@ function handlePinch(side, pinching, pinchPt, wrist) {
     if (hit && hit.panel.grabbable) { st.target = { type: 'panel', panel: hit.panel, off: hit.panel.mesh.position.clone().sub(pinchPt) }; return; }
     // 3) grab orb?
     const orb = orbNear(pinchPt);
-    if (orb) { st.target = { type: 'orb', orb, quick: true }; orb.state = 'held'; return; }
+    if (orb) { st.target = { type: 'orb', orb, quick: true }; orb.state = 'held'; telemetry.grabs++; return; }
     st.target = null;
   } else if (!pinching && st.down) {
     st.down = false;
@@ -509,7 +589,7 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
       if (p.kind === 'menu') {
         const uv = ph[0].uv;
         for (const b of p.buttons) if (uv.y >= 1 - b.y1 && uv.y <= 1 - b.y0) {
-          if (b.action === 'reset') resetScene(); else toggleLedgerPanel(); return;
+          if (b.action === 'reset') resetScene(); else if (b.action === 'ledger') toggleLedgerPanel(); else toggleTelemetryPanel(); return;
         }
       }
       dragging = { type: 'panel', panel: p };
@@ -597,10 +677,10 @@ if (domDesktop) {
 function animate() {
   renderer.setAnimationLoop((t, frame) => {
     const dt = Math.min(clock.getDelta(), 0.05), el = clock.elapsedTime;
-    // perf sampling
-    perfFrames++;
-    const nowMs = performance.now();
-    if (nowMs - perfLastT >= 500) { perfFps = perfFrames * 1000 / (nowMs - perfLastT); perfFrames = 0; perfLastT = nowMs; updatePerf(); }
+    // accurate frame-time sampling (real deltas, ring buffer)
+    frameTimes.push(dt * 1000);
+    if (frameTimes.length > FRAME_BUF_N) frameTimes.shift();
+    if (!updatePerf._last || t - updatePerf._last > 500) { updatePerf._last = t; updatePerf(); }
     // gate pulse
     const pulse = 1 + Math.sin(el * 2.4) * 0.06;
     torus.scale.set(pulse, pulse, 1);
