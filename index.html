@@ -460,6 +460,70 @@ const hands = { left: null, right: null };
 const pinchState = { left: { down: false, t0: 0, target: null }, right: { down: false, t0: 0, target: null } };
 const palmState = { left: { up: false, t0: 0 }, right: { up: false, t0: 0 } };
 
+/* ---- hand scan visualization: renders the tracked skeleton so the
+   wearer can SEE their hands are scanned in. 25 joints/hand, glowing
+   dots + finger links, with a pulse when a hand is first acquired. ---- */
+const HAND_JOINTS = ['wrist',
+  'thumb-metacarpal','thumb-phalanx-proximal','thumb-phalanx-distal','thumb-tip',
+  'index-finger-metacarpal','index-finger-phalanx-proximal','index-finger-phalanx-intermediate','index-finger-phalanx-distal','index-finger-tip',
+  'middle-finger-metacarpal','middle-finger-phalanx-proximal','middle-finger-phalanx-intermediate','middle-finger-phalanx-distal','middle-finger-tip',
+  'ring-finger-metacarpal','ring-finger-phalanx-proximal','ring-finger-phalanx-intermediate','ring-finger-phalanx-distal','ring-finger-tip',
+  'pinky-finger-metacarpal','pinky-finger-phalanx-proximal','pinky-finger-phalanx-intermediate','pinky-finger-phalanx-distal','pinky-finger-tip'];
+const HAND_LINKS = [];
+(function(){
+  const fingers = [
+    ['thumb-metacarpal','thumb-phalanx-proximal','thumb-phalanx-distal','thumb-tip'],
+    ['index-finger-metacarpal','index-finger-phalanx-proximal','index-finger-phalanx-intermediate','index-finger-phalanx-distal','index-finger-tip'],
+    ['middle-finger-metacarpal','middle-finger-phalanx-proximal','middle-finger-phalanx-intermediate','middle-finger-phalanx-distal','middle-finger-tip'],
+    ['ring-finger-metacarpal','ring-finger-phalanx-proximal','ring-finger-phalanx-intermediate','ring-finger-phalanx-distal','ring-finger-tip'],
+    ['pinky-finger-metacarpal','pinky-finger-phalanx-proximal','pinky-finger-phalanx-intermediate','pinky-finger-phalanx-distal','pinky-finger-tip'],
+  ];
+  for (const f of fingers) {
+    HAND_LINKS.push(['wrist', f[0]]);
+    for (let i = 0; i < f.length - 1; i++) HAND_LINKS.push([f[i], f[i+1]]);
+  }
+})();
+const handScan = { left: null, right: null };   // {dots[], lineGeo, group, acquiredAt}
+const scanDotGeo = new THREE.SphereGeometry(0.008, 8, 6);
+const scanDotMat = new THREE.MeshBasicMaterial({ color: 0x53e9ff, transparent: true, opacity: 0.95 });
+const scanLineMat = new THREE.LineBasicMaterial({ color: 0x2a9fd8, transparent: true, opacity: 0.7 });
+function ensureHandScan(side) {
+  if (handScan[side]) return handScan[side];
+  const group = new THREE.Group();
+  const dots = HAND_JOINTS.map(() => { const m = new THREE.Mesh(scanDotGeo, scanDotMat); group.add(m); return m; });
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(HAND_LINKS.length * 6), 3));
+  group.add(new THREE.LineSegments(lineGeo, scanLineMat));
+  group.visible = false;
+  scene.add(group);
+  return (handScan[side] = { group, dots, lineGeo, acquiredAt: 0, seen: false });
+}
+function updateHandScan(side, frame, hand, refSpace) {
+  const viz = ensureHandScan(side);
+  const pts = {};
+  let ok = 0;
+  for (const j of HAND_JOINTS) {
+    const p = jointPos(frame, hand, refSpace, j);
+    pts[j] = p; if (p) ok++;
+  }
+  if (ok < 10) { viz.group.visible = false; viz.seen = false; return; }  // lost tracking
+  viz.group.visible = true;
+  if (!viz.seen) { viz.seen = true; viz.acquiredAt = clock.elapsedTime; hint(side + " hand scanned in.", 2500); }
+  const pulse = Math.max(0, 1 - (clock.elapsedTime - viz.acquiredAt) / 1.2);  // scan-in flash
+  HAND_JOINTS.forEach((j, i) => {
+    const d = viz.dots[i], p = pts[j];
+    if (!p) { d.visible = false; return; }
+    d.visible = true; d.position.copy(p);
+    d.scale.setScalar(1 + pulse * 2.2);
+  });
+  const arr = viz.lineGeo.attributes.position.array;
+  HAND_LINKS.forEach(([a, b], i) => {
+    const pa = pts[a] || new THREE.Vector3(), pb = pts[b] || new THREE.Vector3();
+    arr.set([pa.x, pa.y, pa.z, pb.x, pb.y, pb.z], i * 6);
+  });
+  viz.lineGeo.attributes.position.needsUpdate = true;
+}
+
 function jointPos(frame, hand, refSpace, name) {
   try {
     const js = hand.get(name);
@@ -480,8 +544,16 @@ function updateHands(frame, refSpace) {
     const pinchPt = thumb.clone().add(index).multiplyScalar(0.5);
     const pinching = thumb.distanceTo(index) < 0.028;
     hands[side] = { pinchPt, wrist, hand, refSpace, frame };
+    updateHandScan(side, frame, hand, refSpace);
     handlePinch(side, pinching, pinchPt, wrist);
     handlePalm(side, hand, refSpace, frame, wrist);
+  }
+  // hide scans for hands that vanished this frame
+  for (const side of ['left', 'right']) {
+    if (handScan[side] && handScan[side].seen &&
+        ![...((xrSession && xrSession.inputSources) || [])].some(s => s.hand && s.handedness === side)) {
+      handScan[side].group.visible = false; handScan[side].seen = false;
+    }
   }
 }
 function panelAt(point) {
