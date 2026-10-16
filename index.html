@@ -25,7 +25,7 @@
   #hint { position: fixed; bottom: 14px; left: 0; right: 0; text-align: center; z-index: 5;
     font-size: 12px; color: #8fa3c8; pointer-events: none; padding: 0 16px; }
   #honesty { position: fixed; bottom: 0; left: 0; right: 0; text-align: center; z-index: 4;
-    font-size: 10.5px; color: #5b6b8c; background: rgba(4,6,12,.72); padding: 5px 10px; pointer-events: none; }
+    font-size: 12px; color: #9fb4d8; background: rgba(4,6,12,.72); padding: 5px 10px; pointer-events: none; }
   #fallback { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
     z-index: 6; background: rgba(4,6,12,.88); text-align: center; padding: 24px; }
   #fallback p { max-width: 520px; line-height: 1.6; color: #c8d6f2; }
@@ -194,7 +194,7 @@ const ribbon = new THREE.Mesh(
   new THREE.PlaneGeometry(2.3, 0.215),
   new THREE.MeshBasicMaterial({ map: ribbonTex, transparent: true })
 );
-ribbon.position.set(0, 2.55, -2.6); scene.add(ribbon);
+ribbon.position.set(0, 2.88, -2.6); scene.add(ribbon);
 drawRibbon();
 
 /* shatter particle pool (reused) */
@@ -261,7 +261,7 @@ function spawnOrbs() {
     const halo = new THREE.Mesh(new THREE.SphereGeometry(0.165, 16, 12),
       new THREE.MeshBasicMaterial({ color: COL.orb, transparent: true, opacity: 0.18 }));
     g.add(halo);
-    const lab = makeTextSprite(qq.short, 40, "#cfe6ff"); lab.scale.set(0.85, 0.21, 1); lab.position.y = -0.26; g.add(lab);
+    const lab = makeTextSprite(qq.short, 40, "#cfe6ff"); lab.scale.set(0.78, 0.195, 1); lab.position.y = (i % 2 === 0) ? -0.27 : -0.40; g.add(lab);
     scene.add(g);
     orbs.push({ group: g, mesh: m, halo, query: qq.q, short: qq.short, slot: g.position.clone(), state: 'idle', vel: new THREE.Vector3(), t: 0 });
   });
@@ -762,7 +762,7 @@ checkXR();
 if (domDesktop) {
   document.getElementById('desktopBar').style.display = 'flex';
   document.getElementById('fallback').style.display = 'flex';
-  setTimeout(() => document.getElementById('fallback').style.display = 'none', 7000);
+  setTimeout(() => { document.getElementById('fallback').style.display = 'none'; hint('Desktop preview: click an orb to select it, then double-click (or press Send) to run it through the gate.', 0); }, 7000);
   hint("Desktop preview: click an orb to select, double-click to send it through the gate. Drag to look around.", 9000);
 }
 
