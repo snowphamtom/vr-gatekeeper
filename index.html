@@ -261,7 +261,7 @@ function spawnOrbs() {
     const halo = new THREE.Mesh(new THREE.SphereGeometry(0.165, 16, 12),
       new THREE.MeshBasicMaterial({ color: COL.orb, transparent: true, opacity: 0.18 }));
     g.add(halo);
-    const lab = makeTextSprite(qq.short, 40, "#cfe6ff"); lab.scale.set(0.62, 0.155, 1); lab.position.y = (i % 2 === 0) ? -0.30 : -0.48; g.add(lab);
+    const lab = makeTextSprite(qq.short, 40, "#cfe6ff"); lab.scale.set(0.62, 0.155, 1); lab.position.y = (i % 2 === 0) ? -0.30 : -0.56; g.add(lab);
     scene.add(g);
     orbs.push({ group: g, mesh: m, halo, query: qq.q, short: qq.short, slot: g.position.clone(), state: 'idle', vel: new THREE.Vector3(), t: 0 });
   });
